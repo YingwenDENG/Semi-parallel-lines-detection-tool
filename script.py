@@ -6,11 +6,11 @@ import arcpy
 arcpy.env.overwriteOutput = True
 
 mxd = arcpy.mapping.MapDocument("current")
-df = mxd.activeDataFrame  
+df = mxd.activeDataFrame
 
 input_line = arcpy.GetParameterAsText(0)
-SearchDistance = arcpy.GetParameterAsText(1) # unit meter
-AngleTolerance = float(arcpy.GetParameterAsText(2)) # unit degree
+SearchDistance = arcpy.GetParameterAsText(1)  # unit meter
+AngleTolerance = float(arcpy.GetParameterAsText(2))  # unit degree
 WorkPath = arcpy.GetParameterAsText(3)
 OutFeatureClass1 = WorkPath + "\\output1.shp"
 OutFeatureClass2 = WorkPath + "\\output2.shp"
@@ -22,7 +22,7 @@ dbName = "lines_" + time.strftime("%Y-%m-%d_%H%M%S") + ".gdb"
 
 TempDB = TempDir + "\\" + dbName
 SegmentsFC1 = TempDB + "\\Segments1"
-SegmentsFC2 = TempDB + "\\Segments2" 
+SegmentsFC2 = TempDB + "\\Segments2"
 NearTable = TempDB + "\\NearTable"
 NearDist = TempDB + "\\NearDist"
 NearDistAngle = TempDB + "\\NearDistAngle"
@@ -51,10 +51,10 @@ def addFeature(startPoint, endPoint, insertCount):
 
     # insert the new feature and clear the array
     insertCursor[insertCount].insertRow(feature)
+    points.removeAll()
 
 
 def addNonParallelIds(segmentsFC, idColumn, missingColumn):
-
     searchCursorSegment = arcpy.SearchCursor(segmentsFC, None, None, "OBJECTID")
     insertCursorResult = arcpy.InsertCursor(Result)
     for segment in searchCursorSegment:
@@ -98,6 +98,7 @@ insertCursor = [
 
 arcpy.AddMessage("Breaking lines into segments for each polyline")
 
+# geom contains two sets of polyline
 geomCount = 0
 for fromRow in searchCursor:
     geom = fromRow.getValue(shapeName)
@@ -112,11 +113,13 @@ del searchCursor
 del insertCursor
 
 # Generate near table of features within search distance
-arcpy.AddMessage("Generating near table")
+arcpy.AddMessage("Generating distance comparison table--NearTable")
 arcpy.GenerateNearTable_analysis(SegmentsFC1, SegmentsFC2, NearTable, SearchDistance,
                                  "NO_LOCATION", "NO_ANGLE", "ALL")
-
-# reduce the near table to just the non-touching features
+# alter the name of field: in the previous table "IN_FID" stands for segmentsFC1, "NEAR_FID"-->segmentsFC2
+arcpy.AlterField_management(NearTable, "IN_FID", "SegFC1_ID")
+arcpy.AlterField_management(NearTable, "NEAR_FID", "SegFC2_ID")
+# reduce the near table to just the non-touching features -- NearDist
 arcpy.TableSelect_analysis(NearTable, NearDist, "NEAR_DIST > 0")
 
 # add fields for from feature angle, to feature angle
@@ -127,11 +130,11 @@ arcpy.AddField_management(NearDist, "AngleDiff", "DOUBLE")
 # create a join to copy the angles to the fromAngle and toAngle fields
 arcpy.AddMessage("Copying angles")
 arcpy.MakeTableView_management(NearDist, "ND")
-arcpy.AddJoin_management("ND", "IN_FID", SegmentsFC1, "OBJECTID")
+arcpy.AddJoin_management("ND", "SegFC1_ID", SegmentsFC1, "OBJECTID")
 arcpy.CalculateField_management("ND", "NearDist.FromAngle", "!Segments1.Angle!", "PYTHON")
 arcpy.RemoveJoin_management("ND")
 
-arcpy.AddJoin_management("ND", "NEAR_FID", SegmentsFC2, "OBJECTID")
+arcpy.AddJoin_management("ND", "SegFC2_ID", SegmentsFC2, "OBJECTID")
 arcpy.CalculateField_management("ND", "NearDist.ToAngle", "!Segments2.Angle!", "PYTHON")
 arcpy.RemoveJoin_management("ND")
 
@@ -151,23 +154,29 @@ arcpy.DeleteField_management(Result, "FromAngle")
 arcpy.DeleteField_management(Result, "ToAngle")
 arcpy.DeleteField_management(Result, "AngleDiff")
 arcpy.DeleteField_management(Result, "NEAR_DIST")
- 
+arcpy.DeleteField_management(Result, "NEAR_RANK")
 
-addNonParallelIds(SegmentsFC1, "IN_FID", "NEAR_FID")
-addNonParallelIds(SegmentsFC2, "NEAR_FID", "IN_FID")
+addNonParallelIds(SegmentsFC1, "SegFC1_ID", "SegFC2_ID")
+addNonParallelIds(SegmentsFC2, "SegFC2_ID", "SegFC1_ID")
 
-# join to the table and export to OutFeatureClass
-# join to the table and export to OutFeatureClass
+# get the ID of parallel segments
+seg1_p_ID = set(row[0] for row in arcpy.da.SearchCursor(NearDistAngle, "SegFC1_ID"))
+seg2_p_ID = set(row[0] for row in arcpy.da.SearchCursor(NearDistAngle, "SegFC2_ID"))
+
+# select the parallel segments and add the highlighted selected segments layer to the Table of Contents
 arcpy.AddMessage("Exporting records")
 arcpy.MakeFeatureLayer_management(SegmentsFC1, "SegFC1")
-arcpy.AddJoin_management("SegFC1", "OBJECTID", NearDistAngle, "IN_FID", "KEEP_COMMON")
-arcpy.CopyFeatures_management("SegFC1", OutFeatureClass1)
-selection1 = arcpy.mapping.Layer(OutFeatureClass1)  
-arcpy.mapping.AddLayer(df, selection1, "TOP")  
+for x in seg1_p_ID:
+    arcpy.SelectLayerByAttribute_management("SegFC1", "ADD_TO_SELECTION", '"OBJECTID" = {}'.format(x))
+selection1 = arcpy.mapping.Layer("SegFC1")
+arcpy.mapping.AddLayer(df, selection1, "TOP")
 
 arcpy.MakeFeatureLayer_management(SegmentsFC2, "SegFC2")
-arcpy.AddJoin_management("SegFC2", "OBJECTID", NearDistAngle, "NEAR_FID", "KEEP_COMMON")
-arcpy.CopyFeatures_management("SegFC2", OutFeatureClass2)
-selection2 = arcpy.mapping.Layer(OutFeatureClass2)  
-arcpy.mapping.AddLayer(df, selection2, "TOP")  
+for y in seg2_p_ID:
+    arcpy.SelectLayerByAttribute_management("SegFC2", "ADD_TO_SELECTION", '"OBJECTID" = {}'.format(y))
+selection2 = arcpy.mapping.Layer("SegFC2")
+arcpy.mapping.AddLayer(df, selection2, "TOP")
 
+# add the result table to the TOC
+result = arcpy.mapping.TableView(Result)
+arcpy.mapping.AddTableView(df, result)
